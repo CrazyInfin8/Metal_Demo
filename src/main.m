@@ -1,5 +1,6 @@
 #include "types.h"
 #include "VertexData.h"
+#include "mathUtilities.h"
 
 #define uint32 MacOSUint32
 
@@ -28,6 +29,19 @@ inline NSURL *assetsURL(NSString *path) {
     NSURL *assetsURL = bundleURL(@"Contents/Resources/assets");
     if (path == nil) return assetsURL;
     return [assetsURL URLByAppendingPathComponent:path];
+}
+
+#include <time.h>
+
+float64 startTime = 0.0;
+float64 currentTimeMillis() {
+    if (startTime == 0.0) {
+        startTime = (float64) clock() / CLOCKS_PER_SEC;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    float64 currentTime = (float64) ts.tv_sec * 1000.0 + (float64) ts.tv_nsec / 1000000.0;
+    return currentTime - startTime;
 }
 
 @interface Texture : NSObject {
@@ -101,7 +115,8 @@ inline NSURL *assetsURL(NSString *path) {
     id <MTLCommandBuffer> commandBuffer;
     id <MTLRenderPipelineState> renderPipeline;
     id <MTLBuffer> vertexBuffer;
-
+    id <MTLBuffer> cubeVertexBuffer;
+    id <MTLBuffer> transformationBuffer;
     Texture *grassTexture;
 }
 
@@ -117,7 +132,7 @@ inline NSURL *assetsURL(NSString *path) {
 
 - (void)initGraphics;
 
-- (void)createSquare;
+- (void)createCube;
 
 - (void)createLibrary;
 
@@ -163,7 +178,7 @@ inline NSURL *assetsURL(NSString *path) {
     [self createWindow];
     [self initGraphics];
 
-    [self createSquare];
+    [self createCube];
     [self createLibrary];
     [self createCommandQueue];
     [self createRenderPipeline];
@@ -234,19 +249,67 @@ inline NSURL *assetsURL(NSString *path) {
     self.contentView.wantsLayer = YES;
 }
 
-- (void)createSquare {
-    const VertexData squareVertices[] = {
-            {{-0.5f, -0.5f, 0.5f, 1.0f}, {0.0f, 0.0f}},
-            {{-0.5f, 0.5f,  0.5f, 1.0f}, {0.0f, 1.0f}},
-            {{0.5f,  0.5f,  0.5f, 1.0f}, {1.0f, 1.0f}},
-            {{-0.5f, -0.5f, 0.5f, 1.0f}, {0.0f, 0.0f}},
-            {{0.5f,  0.5f,  0.5f, 1.0f}, {1.0f, 1.0f}},
-            {{0.5f,  -0.5f, 0.5f, 1.0f}, {1.0f, 0.0f}}
+- (void)createCube {
+    const VertexData cubeVertices[] = {
+            // Front face
+            {{-0.5f, -0.5f, 0.5f,  1.0f}, {0.0f, 0.0f}},
+            {{0.5f,  -0.5f, 0.5f,  1.0f}, {1.0f, 0.0f}},
+            {{0.5f,  0.5f,  0.5f,  1.0f}, {1.0f, 1.0f}},
+            {{0.5f,  0.5f,  0.5f,  1.0f}, {1.0f, 1.0f}},
+            {{-0.5f, 0.5f,  0.5f,  1.0f}, {0.0f, 1.0f}},
+            {{-0.5f, -0.5f, 0.5f,  1.0f}, {0.0f, 0.0f}},
+
+            // Back face
+            {{0.5f,  -0.5f, -0.5f, 1.0f}, {0.0f, 0.0f}},
+            {{-0.5f, -0.5f, -0.5f, 1.0f}, {1.0f, 0.0f}},
+            {{-0.5f, 0.5f,  -0.5f, 1.0f}, {1.0f, 1.0f}},
+            {{-0.5f, 0.5f,  -0.5f, 1.0f}, {1.0f, 1.0f}},
+            {{0.5f,  0.5f,  -0.5f, 1.0f}, {0.0f, 1.0f}},
+            {{0.5f,  -0.5f, -0.5f, 1.0f}, {0.0f, 0.0f}},
+
+            // Top face
+            {{-0.5f, 0.5f,  0.5f,  1.0f}, {0.0f, 0.0f}},
+            {{0.5f,  0.5f,  0.5f,  1.0f}, {1.0f, 0.0f}},
+            {{0.5f,  0.5f,  -0.5f, 1.0f}, {1.0f, 1.0f}},
+            {{0.5f,  0.5f,  -0.5f, 1.0f}, {1.0f, 1.0f}},
+            {{-0.5f, 0.5f,  -0.5f, 1.0f}, {0.0f, 1.0f}},
+            {{-0.5f, 0.5f,  0.5f,  1.0f}, {0.0f, 0.0f}},
+
+            // Bottom face
+            {{-0.5f, -0.5f, -0.5f, 1.0f}, {0.0f, 0.0f}},
+            {{0.5f,  -0.5f, -0.5f, 1.0f}, {1.0f, 0.0f}},
+            {{0.5f,  -0.5f, 0.5f,  1.0f}, {1.0f, 1.0f}},
+            {{0.5f,  -0.5f, 0.5f,  1.0f}, {1.0f, 1.0f}},
+            {{-0.5f, -0.5f, 0.5f,  1.0f}, {0.0f, 1.0f}},
+            {{-0.5f, -0.5f, -0.5f, 1.0f}, {0.0f, 0.0f}},
+
+            // Left face
+            {{-0.5f, -0.5f, -0.5f, 1.0f}, {0.0f, 0.0f}},
+            {{-0.5f, -0.5f, 0.5f,  1.0f}, {1.0f, 0.0f}},
+            {{-0.5f, 0.5f,  0.5f,  1.0f}, {1.0f, 1.0f}},
+            {{-0.5f, 0.5f,  0.5f,  1.0f}, {1.0f, 1.0f}},
+            {{-0.5f, 0.5f,  -0.5f, 1.0f}, {0.0f, 1.0f}},
+            {{-0.5f, -0.5f, -0.5f, 1.0f}, {0.0f, 0.0f}},
+
+            // Right face
+            {{0.5f,  -0.5f, 0.5f,  1.0f}, {0.0f, 0.0f}},
+            {{0.5f,  -0.5f, -0.5f, 1.0f}, {1.0f, 0.0f}},
+            {{0.5f,  0.5f,  -0.5f, 1.0f}, {1.0f, 1.0f}},
+            {{0.5f,  0.5f,  -0.5f, 1.0f}, {1.0f, 1.0f}},
+            {{0.5f,  0.5f,  0.5f,  1.0f}, {0.0f, 1.0f}},
+            {{0.5f,  -0.5f, 0.5f,  1.0f}, {0.0f, 0.0f}},
     };
 
-    vertexBuffer = [device newBufferWithBytes:squareVertices
-                                       length:sizeof(squareVertices)
-                                      options:MTLResourceStorageModeShared];
+//    vertexBuffer = [device newBufferWithBytes:cubeVertices
+//                                       length:sizeof(cubeVertices)
+//                                      options:MTLResourceStorageModeShared];
+
+    cubeVertexBuffer = [device newBufferWithBytes:cubeVertices
+                                           length:sizeof(cubeVertices)
+                                          options:MTLResourceStorageModeShared];
+
+    transformationBuffer = [device newBufferWithLength:sizeof(Transformation)
+                                               options:MTLResourceStorageModeShared];
 
     grassTexture = [[Texture alloc] loadAsset:@"mc_grass.jpeg" device:device];
 }
@@ -304,10 +367,49 @@ inline NSURL *assetsURL(NSString *path) {
 }
 
 - (void)encodeRenderCommand:(id <MTLRenderCommandEncoder>)renderCommandEncoder {
+    matrix_float4x4 translationMatrix = translationMatrix4x4(0.0f, 0.0f, -1.0f);
+
+    float64 currentTime = currentTimeMillis();
+    float angle = (float)fmod(currentTime * TO_RAD / 50, 360);
+    NSLog(@"angle: %f", angle);
+    NSLog(@"current time: %f", currentTime);
+    matrix_float4x4 rotationMatrix = rotationMatrix4x4(angle, 0.0f, 1.0f, 0.0f);
+
+    matrix_float4x4 modelMatrix = matrix_multiply(translationMatrix, rotationMatrix);
+
+    simd_float3 R = {1.0f, 0.0f, 0.0f};
+    simd_float3 U = {0.0f, 1.0f, 0.0f};
+    simd_float3 F = {0.0f, 0.0f, -1.0f};
+    simd_float3 P = {0.0f, 0.0f, 1.0f};
+
+    simd_float4x4 viewMatrix = setMatrix4x4(
+            R.x, R.y, R.z, simd_dot(-R, P),
+            U.x, U.y, U.z, -simd_dot(-U, P),
+            -F.x, -F.y, -F.z, simd_dot(F, P),
+            0.0f, 0.0f, 0.0f, 1.0f
+    );
+
+    float aspectRatio = (float)(layer.frame.size.width / layer.frame.size.height);
+    float fov = 90 * TO_RAD;
+    float nearZ = 0.1f;
+    float farZ = 100.0f;
+
+    simd_float4x4 perspectiveMatrix = matrixPerspectiveRightHand(fov, aspectRatio, nearZ, farZ);
+
+    Transformation transformation = {
+            .modelMatrix = modelMatrix,
+            .viewMatrix = viewMatrix,
+            .perspectiveMatrix = perspectiveMatrix
+    };
+
+    memcpy([transformationBuffer contents], &transformation, sizeof(Transformation));
+
+
     [renderCommandEncoder setRenderPipelineState:renderPipeline];
-    [renderCommandEncoder setVertexBuffer:vertexBuffer offset:0 atIndex:0];
+    [renderCommandEncoder setVertexBuffer:cubeVertexBuffer offset:0 atIndex:0];
+    [renderCommandEncoder setVertexBuffer:transformationBuffer offset:0 atIndex:1];
     [renderCommandEncoder setFragmentTexture:[grassTexture getTexture] atIndex:0];
-    [renderCommandEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+    [renderCommandEncoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:36];
 }
 
 - (NSSize)frameBufferSizeCallback:(NSSize)size {
