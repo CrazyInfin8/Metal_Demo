@@ -34,6 +34,7 @@ inline NSURL *assetsURL(NSString *path) {
 #include <time.h>
 
 float64 startTime = 0.0;
+
 float64 currentTimeMillis() {
     if (startTime == 0.0) {
         startTime = (float64) clock() / CLOCKS_PER_SEC;
@@ -48,7 +49,6 @@ float64 currentTimeMillis() {
     id <MTLTexture> texture;
     int width;
     int height;
-    int channels;
 @private
     id <MTLDevice> device;
 }
@@ -72,7 +72,6 @@ float64 currentTimeMillis() {
 
     width = (int) image.size.width;
     height = (int) image.size.height;
-    channels = 4;
 
     MTLTextureDescriptor *textureDescriptor = [[MTLTextureDescriptor alloc] init];
     textureDescriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
@@ -114,10 +113,14 @@ float64 currentTimeMillis() {
     id <MTLCommandQueue> commandQueue;
     id <MTLCommandBuffer> commandBuffer;
     id <MTLRenderPipelineState> renderPipeline;
-    id <MTLBuffer> vertexBuffer;
     id <MTLBuffer> cubeVertexBuffer;
     id <MTLBuffer> transformationBuffer;
+    id <MTLDepthStencilState> depthStencilState;
+    MTLRenderPassDescriptor *renderPassDescriptor;
+    id <MTLTexture> msaaTargetTexture;
+    id <MTLTexture> depthTexture;
     Texture *grassTexture;
+    int sampleCount;
 }
 
 - (instancetype)init;
@@ -132,13 +135,23 @@ float64 currentTimeMillis() {
 
 - (void)initGraphics;
 
+- (void)closeGraphics;
+
 - (void)createCube;
+
+- (void)createBuffers;
 
 - (void)createLibrary;
 
 - (void)createCommandQueue;
 
 - (void)createRenderPipeline;
+
+- (void)createDepthAndMSAATextures;
+
+- (void)createRenderPassDescriptor;
+
+- (void)updateRenderPassDescriptor;
 
 - (void)encodeRenderCommand:(id <MTLRenderCommandEncoder>)renderCommandEncoder;
 
@@ -179,9 +192,12 @@ float64 currentTimeMillis() {
     [self initGraphics];
 
     [self createCube];
+    [self createBuffers];
     [self createLibrary];
     [self createCommandQueue];
     [self createRenderPipeline];
+    [self createDepthAndMSAATextures];
+    [self createRenderPassDescriptor];
     return self;
 }
 
@@ -239,6 +255,7 @@ float64 currentTimeMillis() {
 }
 
 - (void)initGraphics {
+    sampleCount = 4;
     device = MTLCreateSystemDefaultDevice();
     layer = [CAMetalLayer layer];
     layer.device = device;
@@ -247,6 +264,17 @@ float64 currentTimeMillis() {
     NSLog(@"layer drawable size: %f, %f", layer.drawableSize.width, layer.drawableSize.height);
     self.contentView.layer = layer;
     self.contentView.wantsLayer = YES;
+    [self createRenderPassDescriptor];
+
+    drawable = [layer nextDrawable];
+}
+
+- (void)closeGraphics {
+    [transformationBuffer release];
+    [msaaTargetTexture release];
+    [depthTexture release];
+    [device release];
+    [grassTexture release];
 }
 
 - (void)createCube {
@@ -300,9 +328,9 @@ float64 currentTimeMillis() {
             {{0.5f,  -0.5f, 0.5f,  1.0f}, {0.0f, 0.0f}},
     };
 
-//    vertexBuffer = [device newBufferWithBytes:cubeVertices
-//                                       length:sizeof(cubeVertices)
-//                                      options:MTLResourceStorageModeShared];
+    cubeVertexBuffer = [device newBufferWithBytes:cubeVertices
+                                           length:sizeof(cubeVertices)
+                                          options:MTLResourceStorageModeShared];
 
     cubeVertexBuffer = [device newBufferWithBytes:cubeVertices
                                            length:sizeof(cubeVertices)
@@ -312,6 +340,11 @@ float64 currentTimeMillis() {
                                                options:MTLResourceStorageModeShared];
 
     grassTexture = [[Texture alloc] loadAsset:@"mc_grass.jpeg" device:device];
+}
+
+- (void)createBuffers {
+    transformationBuffer = [device newBufferWithLength:sizeof(Transformation)
+                                               options:MTLResourceStorageModeShared];
 }
 
 - (void)createLibrary {
@@ -339,22 +372,32 @@ float64 currentTimeMillis() {
     pipelineDescriptor.fragmentFunction = fragmentFunction;
     assert(pipelineDescriptor);
     pipelineDescriptor.colorAttachments[0].pixelFormat = layer.pixelFormat;
+    pipelineDescriptor.rasterSampleCount = sampleCount;
+    pipelineDescriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
 
     NSError *error = nil;
     renderPipeline = [device newRenderPipelineStateWithDescriptor:pipelineDescriptor error:&error];
+
+    if (renderPipeline == nil) {
+        NSLog(@"Failed to create render pipeline state: %@", error);
+        [NSApp terminate:nil];
+        exit(-1);
+    }
+
+    MTLDepthStencilDescriptor *depthStencilDescriptor = [[MTLDepthStencilDescriptor alloc] init];
+    depthStencilDescriptor.depthCompareFunction = MTLCompareFunctionLessEqual;
+    depthStencilDescriptor.depthWriteEnabled = YES;
+    depthStencilState = [device newDepthStencilStateWithDescriptor:depthStencilDescriptor];
+
     [pipelineDescriptor release];
+    [vertexFunction release];
+    [fragmentFunction release];
 }
 
 - (void)sendRenderCommand {
     commandBuffer = [commandQueue commandBuffer];
 
-    MTLRenderPassDescriptor *renderPassDescriptor = [[MTLRenderPassDescriptor alloc] init];
-    MTLRenderPassColorAttachmentDescriptor *colorAttachmentDescriptor = renderPassDescriptor.colorAttachments[0];
-    colorAttachmentDescriptor.texture = [drawable texture];
-    colorAttachmentDescriptor.loadAction = MTLLoadActionClear;
-    colorAttachmentDescriptor.clearColor = MTLClearColorMake(41.0f / 255.0f, 42.0f / 255.0f, 48.0f / 255.0f, 1.0);
-    colorAttachmentDescriptor.storeAction = MTLStoreActionStore;
-
+    [self updateRenderPassDescriptor];
     id <MTLRenderCommandEncoder> renderCommandEncoder = [commandBuffer renderCommandEncoderWithDescriptor:renderPassDescriptor];
     [self encodeRenderCommand:renderCommandEncoder];
     [renderCommandEncoder endEncoding];
@@ -362,17 +405,60 @@ float64 currentTimeMillis() {
     [commandBuffer presentDrawable:drawable];
     [commandBuffer commit];
     [commandBuffer waitUntilCompleted];
+}
 
-    [renderPassDescriptor release];
+- (void)createDepthAndMSAATextures {
+    MTLTextureDescriptor *msaaTextureDescriptor = [[MTLTextureDescriptor alloc] init];
+    msaaTextureDescriptor.textureType = MTLTextureType2DMultisample;
+    msaaTextureDescriptor.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    msaaTextureDescriptor.width = (NSUInteger) layer.drawableSize.width;
+    msaaTextureDescriptor.height = (NSUInteger) layer.drawableSize.height;
+    msaaTextureDescriptor.sampleCount = sampleCount;
+    msaaTextureDescriptor.usage = MTLTextureUsageRenderTarget;
+
+    msaaTargetTexture = [device newTextureWithDescriptor:msaaTextureDescriptor];
+
+    MTLTextureDescriptor *depthTextureDescriptor = [[MTLTextureDescriptor alloc] init];
+    depthTextureDescriptor.textureType = MTLTextureType2DMultisample;
+    depthTextureDescriptor.pixelFormat = MTLPixelFormatDepth32Float;
+    depthTextureDescriptor.width = (NSUInteger) layer.drawableSize.width;
+    depthTextureDescriptor.height = (NSUInteger) layer.drawableSize.height;
+    depthTextureDescriptor.usage = MTLTextureUsageRenderTarget;
+    depthTextureDescriptor.sampleCount = sampleCount;
+
+    depthTexture = [device newTextureWithDescriptor:depthTextureDescriptor];
+
+    [msaaTextureDescriptor release];
+    [depthTextureDescriptor release];
+}
+
+- (void)createRenderPassDescriptor {
+    renderPassDescriptor = [[MTLRenderPassDescriptor alloc] init];
+    MTLRenderPassColorAttachmentDescriptor *colorAttachmentDescriptor = renderPassDescriptor.colorAttachments[0];
+    colorAttachmentDescriptor.texture = msaaTargetTexture;
+    [colorAttachmentDescriptor setResolveTexture:[drawable texture]];
+    colorAttachmentDescriptor.loadAction = MTLLoadActionClear;
+    colorAttachmentDescriptor.clearColor = MTLClearColorMake(41.0f / 255.0f, 42.0f / 255.0f, 48.0f / 255.0f, 1.0);
+    colorAttachmentDescriptor.storeAction = MTLStoreActionMultisampleResolve;
+
+    MTLRenderPassDepthAttachmentDescriptor *depthAttachmentDescriptor = renderPassDescriptor.depthAttachment;
+    depthAttachmentDescriptor.texture = depthTexture;
+    depthAttachmentDescriptor.loadAction = MTLLoadActionClear;
+    depthAttachmentDescriptor.clearDepth = 1.0;
+    depthAttachmentDescriptor.storeAction = MTLStoreActionDontCare;
+}
+
+- (void)updateRenderPassDescriptor {
+    [renderPassDescriptor.colorAttachments[0] setTexture:msaaTargetTexture];
+    [renderPassDescriptor.colorAttachments[0] setResolveTexture:[drawable texture]];
+    [renderPassDescriptor.depthAttachment setTexture:depthTexture];
 }
 
 - (void)encodeRenderCommand:(id <MTLRenderCommandEncoder>)renderCommandEncoder {
     matrix_float4x4 translationMatrix = translationMatrix4x4(0.0f, 0.0f, -1.0f);
 
     float64 currentTime = currentTimeMillis();
-    float angle = (float)fmod(currentTime * TO_RAD / 50, 360);
-    NSLog(@"angle: %f", angle);
-    NSLog(@"current time: %f", currentTime);
+    float angle = (float) fmod(currentTime * TO_RAD / 50, 360);
     matrix_float4x4 rotationMatrix = rotationMatrix4x4(angle, 0.0f, 1.0f, 0.0f);
 
     matrix_float4x4 modelMatrix = matrix_multiply(translationMatrix, rotationMatrix);
@@ -384,12 +470,12 @@ float64 currentTimeMillis() {
 
     simd_float4x4 viewMatrix = setMatrix4x4(
             R.x, R.y, R.z, simd_dot(-R, P),
-            U.x, U.y, U.z, -simd_dot(-U, P),
+            U.x, U.y, U.z, simd_dot(-U, P),
             -F.x, -F.y, -F.z, simd_dot(F, P),
             0.0f, 0.0f, 0.0f, 1.0f
     );
 
-    float aspectRatio = (float)(layer.frame.size.width / layer.frame.size.height);
+    float aspectRatio = (float) (layer.frame.size.width / layer.frame.size.height);
     float fov = 90 * TO_RAD;
     float nearZ = 0.1f;
     float farZ = 100.0f;
@@ -406,6 +492,7 @@ float64 currentTimeMillis() {
 
 
     [renderCommandEncoder setRenderPipelineState:renderPipeline];
+    [renderCommandEncoder setDepthStencilState:depthStencilState];
     [renderCommandEncoder setVertexBuffer:cubeVertexBuffer offset:0 atIndex:0];
     [renderCommandEncoder setVertexBuffer:transformationBuffer offset:0 atIndex:1];
     [renderCommandEncoder setFragmentTexture:[grassTexture getTexture] atIndex:0];
@@ -415,6 +502,25 @@ float64 currentTimeMillis() {
 - (NSSize)frameBufferSizeCallback:(NSSize)size {
     NSLog(@"layer drawable size: %f, %f", layer.drawableSize.width, layer.drawableSize.height);
     layer.drawableSize = size;
+
+    if (msaaTargetTexture != nil) {
+        [msaaTargetTexture release];
+        msaaTargetTexture = nil;
+    }
+    if (depthTexture != nil) {
+        [depthTexture release];
+        depthTexture = nil;
+    }
+    [self createDepthAndMSAATextures];
+    drawable = [layer nextDrawable];
+    @try {
+        [self updateRenderPassDescriptor];
+    } @catch (NSException *exception) {
+        NSLog(@"Exception on line 533: %@", exception);
+        @throw exception;
+    }
+
+    NSLog(@"###");
     return size;
 }
 @end
